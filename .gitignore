@@ -1,0 +1,14 @@
+.git
+.snakemake
+etc
+data
+log
+results/
+*.csv#
+.Rproj.user
+.RData
+.RDataTmp
+swissprot.*
+taxdb.*
+*.log
+*.stats

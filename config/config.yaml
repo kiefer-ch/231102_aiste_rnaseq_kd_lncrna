@@ -1,0 +1,6 @@
+# General
+SPECIES: "human"
+GENCODE_VERSION: "44"
+GENOME: "GRCh38.primary_assembly.genome.fa"
+ANNOTATION: "gencode.v44.annotation.gtf"
+TRANSCRIPTS: "gencode.v44.transcripts.fa"
