@@ -1,0 +1,987 @@
+---
+title: "Knockdown of 3 lncRNAs in human adipocytes"
+author: "Christoph Engelhard"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+    html_document:
+        toc: true
+        toc_float: true
+        toc_depth: 2
+        fig_caption: false
+        dev: "svg"
+editor_options:
+    chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo = FALSE,
+    message = FALSE,
+    warning = FALSE,
+    cache = FALSE)
+
+source(".Rprofile")
+suppressPackageStartupMessages({
+    library("dplyr")
+    library("readr")
+    library("purrr")
+    library("ggplot2")
+    library("ggthemes")
+    library("scales")
+    library("patchwork")
+    library("DESeq2")
+    library("org.Hs.eg.db")
+    library("reactome.db")
+    library("fgsea")
+})
+
+BPPARAM = BiocParallel::MulticoreParam(snakemake@threads)
+
+pixels = c(1024, 1024 * .65)
+
+set.seed(45478912)
+```
+
+
+```{r import}
+dds <- readRDS(snakemake@input$dds)
+```
+
+
+```{r rld}
+rld <- rlog(dds, blind = FALSE)
+```
+
+
+```{r annotation}
+coldata <- colData(dds) %>% 
+    as_tibble(rownames = "sample_id")
+
+read_gtf <- function(file) {
+    readr::read_delim(
+        file = file,
+        delim = "\t",
+        comment = "#",
+        na = c('.'),
+        col_names = c(
+            "sequence", "source", "feature", "start", "end", "score",
+            "strand", "phase", "attributes"),
+        col_types = readr::cols(
+            sequence = readr::col_character(),
+            source = readr::col_character(),
+            feature = readr::col_character(),
+            start = readr::col_integer(),
+            end = readr::col_integer(),
+            score = readr::col_character(),
+            strand = readr::col_character(),
+            phase = readr::col_character(),
+            attributes = readr::col_character()),
+        progress = FALSE) %>%
+    dplyr::filter(strand %in% c('+', '-')) %>%
+    dplyr::mutate(
+        feature = as.factor(feature),
+        strand = as.factor(strand))
+}
+
+
+separate_genes <- function(gtf) {
+    gtf %>%
+        filter(feature == "gene") %>%
+        tidyr::separate(
+            attributes,
+            c("gene_id", "gene_type", "gene_name", "level", "extra"),
+            sep = "; ",
+            extra = "merge") %>%
+        mutate(
+            gene_id = substring(gene_id, 10L, nchar(gene_id) - 1L),
+            gene_name = substring(gene_name, 12L, nchar(gene_name) - 1L),
+            gene_type = substring(gene_type, 12L, nchar(gene_type) - 1L))
+}
+
+
+gene_annotation <- read_gtf(snakemake@input$annotation) %>%
+    separate_genes() %>% 
+    dplyr::select(gene_id, gene_name, gene_type) %>% 
+    dplyr::rename(symbol = gene_name)
+
+gene2symbol <- gene_annotation %>%
+    dplyr::select(gene_id, symbol)
+
+
+genecards_path <- "https://www.genecards.org/cgi-bin/carddisp.pl?gene="
+ensembl_path <- "https://www.ensembl.org/Homo_sapiens/Gene/Summary?db=core;g="
+
+tomixed <- function(x) {
+    
+    s <- substring(x, 1, 1)
+    s <- toupper(s)
+
+    paste0(s, substring(x, 2, nchar(x)))
+}
+
+reactome_url <- "https://reactome.org/content/detail/"
+
+reactome_lookup <- as.list(reactomePATHID2NAME) %>% 
+    tibble::enframe("id", "name") %>% 
+    tidyr::unnest(name) %>% 
+    filter(grepl("^R-HSA", id)) %>% 
+    mutate(name = sub("^Homo sapiens: ", "", name))
+
+break.lines <- function(string, n_char = 30) {
+    as.list(string) %>%
+        purrr::map(strwrap, width = n_char) %>%
+        purrr::map(paste, collapse = "\n") %>%
+        unlist()
+}
+```
+
+
+```{r tpm}
+fpkmToTpm <- function(fpkm) {
+    exp(log(fpkm) - log(sum(fpkm)) + log(1e6))
+}
+
+tpm <- fpkm(dds, robust = TRUE)
+tpm <- apply(tpm, 2, fpkmToTpm)
+```
+
+# Overview
+
+## Description
+
+Cell culture of human primary brown (?) adipocytes. Knock down of three lncRNAs
+by siRNA. All samples but those for H19 are stimulated by 
+
+## PCA
+
+Some clustering by norepinephrin (H19) vs ctrl. Also some clustering by subject_id. 
+
+```{r pca}
+# calculate pcs
+pca <- assay(rld) %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    tibble::column_to_rownames("gene_id") %>%
+    data.matrix() %>%
+    t() %>%
+    prcomp(scale. = FALSE)
+
+# importance for labels of the plot
+importance <- summary(pca)[[6]]
+pca <- as_tibble(pca$x, rownames = "sample_id") %>%
+    dplyr::left_join(coldata, by = "sample_id")
+
+pca %>% 
+    ggplot2::ggplot(ggplot2::aes(PC1, PC2)) +
+    geom_line(
+        aes(group = subject_id),
+        colour = "grey75",
+        lwd = .5) +
+    geom_point(
+        aes(
+            colour = siRNA,
+            pch = treatment),
+        size = 2) +
+    scale_y_continuous(breaks = extended_range_breaks()(pca[, 3]),
+        labels = function(x) round(x, 1),
+        name = sprintf("PC2 (%s %% variance)", round(importance[2,2] * 100, 1))) +
+    scale_x_continuous(breaks = extended_range_breaks()(pca[, 2]),
+        labels = function(x) round(x, 1),
+        name = sprintf("PC1 (%s %% variance)",
+        round(importance[2,1] * 100, 1))) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_colorblind()
+```
+
+## KD validation
+
+KD for LINC01348 and LINC01914 seems to work. H19 is not really reduced much.
+The H19 samples don't have norepinephrin treatment, so we see the effect of
+NE on UCP1 as expected. LINC01348 and LINC01914 seem to also be upregulated in 
+the stimulated cells.
+
+```{r}
+dodge <- .5
+
+tpm %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene2symbol) %>% 
+    dplyr::select(gene_id, symbol, everything()) %>%
+    filter(symbol %in% c("UCP1", "H19", "LINC01914", "LINC01348")) %>% 
+    dplyr::select(-gene_id) %>% 
+    tidyr::pivot_longer(
+        cols = matches("kd|ctrl"),
+        names_to = "sample_id",
+        values_to = "tpm") %>%
+    left_join(coldata) %>% 
+    ggplot(aes(symbol, tpm)) +
+    geom_point(
+        aes(
+            colour = condition,
+            pch = subject_id),
+        alpha = .5,
+        size = 2,
+        position = position_dodge(dodge)) +
+    stat_summary(
+        aes(colour = condition),
+        fun = mean, geom = "crossbar",
+        fatten = 1.5, lwd = .5, width = .5,
+        position = position_dodge(width = dodge)) + 
+    stat_summary(
+        aes(colour = condition),
+        geom = "errorbar", fun.data = mean_se,
+        width = .33,
+        lwd = .5,
+        position = position_dodge(width = dodge)) +
+    scale_y_log10("TPM") +
+    xlab(NULL) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_colorblind()
+```
+
+## DGE
+
+The dataset will be treated as three independent datasets for this section.
+Log2FC cutoff = 0. I usually use a cutoff of 1, but reduced it here because the
+effects of the knock downs are small. I also don't shrink the log2 fold changes in 
+order to preserve small changes. This of course raises the potential for false
+positives. The model is kd + subject_id, so takes the repeated measures into account.
+
+In the results tables, click on the gene_id to get to ensembl or on the symbol to get to gene cards.
+
+
+```{r}
+log2fc_cutoff <- 0
+
+dds_h19 <- dds[, coldata$siRNA == "H19"]
+dds_h19$condition <- droplevels(dds_h19$condition)
+
+dds_1348 <- dds[, coldata$siRNA == "1348"]
+dds_1348$condition <- droplevels(dds_1348$condition)
+
+dds_1914 <- dds[, coldata$siRNA == "1914"]
+dds_1914$condition <- droplevels(dds_1914$condition)
+
+
+drop_non_expressed <- function(dds, min_count = 5, min_samples = 3) {
+    dds <- dds[rowSums(counts(dds) >= min_count) >= min_samples, ]
+}
+
+dds_list <- list("H19" = dds_h19, "LINC01348" = dds_1348, "LINC01914" = dds_1914)
+
+dds_list <- dds_list %>% 
+    map(drop_non_expressed) %>% 
+    map(DESeq, test = "Wald", parallel = TRUE, BPPARAM = BPPARAM)
+```
+
+## GSEA
+
+* pathway – name of the pathway as in 'names(pathway)';
+* pval – an enrichment p-value;
+* padj – a BH-adjusted p-value;
+* log2err – the expected error for the standard deviation of the P-value logarithm.
+* ES – enrichment score, same as in Broad GSEA implementation;
+* NES – enrichment score normalized to mean enrichment of random samples of the same size;
+* size – size of the pathway after removing genes not present in 'names(stats)'.
+* leadingEdge – vector with indexes of leading edge genes that drive the enrichment (not printed here!), but used for the ridge plots
+
+ES > 0 means upregulated pathway, ES <0 downregulated pathway.
+
+After analysis, pathways are filtered for independent pathways.
+
+# H19
+
+```{r}
+res_h19 <- dds_list$H19 %>% 
+    results(name = "condition_H19_kd_vs_H19_ctrl",
+        lfcThreshold = log2fc_cutoff,
+        alpha = .05,
+        parallel = TRUE, BPPARAM = BPPARAM) %>% 
+    # lfcShrink(.,
+    #     type = "apeglm",) %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene_annotation, by = join_by(gene_id)) %>% 
+    dplyr::select(gene_id, symbol, gene_type, everything())
+
+write_csv(res_h19, "results/dge_h19.csv.gz")
+```
+
+## Overview
+
+```{r}
+# calculate pcs
+pca <- assay(rld) %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    dplyr::select(matches("gene_id|^H19")) %>% 
+    tibble::column_to_rownames("gene_id") %>%
+    data.matrix() %>%
+    t() %>%
+    prcomp(scale. = FALSE)
+
+# importance for labels of the plot
+importance <- summary(pca)[[6]]
+pca <- as_tibble(pca$x, rownames = "sample_id") %>%
+    dplyr::left_join(coldata, by = "sample_id")
+
+pca_pl <- pca %>% 
+    ggplot2::ggplot(ggplot2::aes(PC1, PC2)) +
+    geom_line(
+        aes(group = subject_id),
+        colour = "grey75",
+        lwd = .5) +
+    geom_point(
+        aes(colour = treatment,
+            pch = subject_id),
+        alpha = .5,
+        size = 2) +
+    scale_y_continuous(breaks = extended_range_breaks()(pca[, 3]),
+        labels = function(x) round(x, 1),
+        name = sprintf("PC2 (%s %% variance)", round(importance[2,2] * 100, 1))) +
+    scale_x_continuous(breaks = extended_range_breaks()(pca[, 2]),
+        labels = function(x) round(x, 1),
+        name = sprintf("PC1 (%s %% variance)",
+        round(importance[2,1] * 100, 1))) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_colorblind() +
+    guides(pch = "none")
+```
+
+
+```{r}
+dodge <- .5
+
+kd_pl <- tpm %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene2symbol) %>% 
+    dplyr::select(gene_id, symbol, everything()) %>%
+    filter(symbol %in% c("UCP1", "H19")) %>% 
+    dplyr::select(-gene_id) %>% 
+    tidyr::pivot_longer(
+        cols = matches("kd|ctrl"),
+        names_to = "sample_id",
+        values_to = "tpm") %>%
+    filter(grepl("^H19", sample_id)) %>% 
+    left_join(coldata) %>% 
+    ggplot(aes(symbol, tpm)) +
+    geom_point(
+        aes(
+            colour = condition,
+            pch = subject_id),
+        alpha = .5,
+        size = 2,
+        position = position_dodge(dodge)) +
+    stat_summary(
+        aes(colour = condition),
+        fun = mean, geom = "crossbar",
+        fatten = 1.5, lwd = .5, width = .5,
+        position = position_dodge(width = dodge)) + 
+    stat_summary(
+        aes(colour = condition),
+        geom = "errorbar", fun.data = mean_se,
+        width = .33,
+        lwd = .5,
+        position = position_dodge(width = dodge)) +
+    scale_y_log10("TPM") +
+    xlab(NULL) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_colorblind(guide = "none") +
+    guides(pch = "none")
+```
+
+
+```{r}
+ma_pl <- res_h19 %>%
+    mutate(significant = case_when(
+        padj < .05 ~ TRUE,
+        TRUE       ~ FALSE)) %>% 
+    ggplot(aes(log10(baseMean), log2FoldChange)) +
+    scattermore::geom_scattermore(
+        aes(colour = significant),
+        pointsize = 4,
+        alpha = .5,
+        pixels = pixels) +
+    scale_x_log10(
+            breaks = log10(c(1, 10, 100, 10000, max(res_h19$baseMean))),
+            labels = function(x) round(10^x),
+            name = "Average counts") +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_stata()
+```
+
+```{r}
+pca_pl + kd_pl + ma_pl + guide_area() +
+  plot_layout(guides = "collect")
+```
+
+
+## Results table
+
+```{r}
+res_h19 %>% 
+    filter(padj < .05) %>%
+    mutate(
+        description = AnnotationDbi::mapIds(
+            org.Hs.eg.db,
+            column = "GENENAME",
+            keys = .$symbol,
+            keytype = "SYMBOL",
+            multiVals = "first")) %>% 
+    arrange(desc(abs(log2FoldChange))) %>% 
+    mutate(across(matches("baseMean|log2F|lfcSE|stat"), ~ round(., 2))) %>% 
+    mutate(across(matches("svalue|padj|pvalue"), scales::label_pvalue())) %>%
+    dplyr::select(gene_id, symbol, description, everything()) %>% 
+    mutate(
+        gene_id = paste0('<a target=_blank href=',
+            ensembl_path, tools::file_path_sans_ext(gene_id), '>', gene_id, '</a>'),
+        symbol = paste0('<a target=_blank href=',
+            genecards_path, symbol, '>', symbol, '</a>')) %>% 
+    DT::datatable(escape = FALSE)
+```
+
+## GSEA
+
+```{r}
+# ranks are only calculated here and reused for msigdb
+ranks <- multiGSEA::rankFeatures(
+    logFC = res_h19$log2FoldChange,
+    pvalues = res_h19$pvalue,
+    base = 2)
+
+names(ranks) <- AnnotationDbi::mapIds(org.Hs.eg.db,
+    keys =  tools::file_path_sans_ext(res_h19$gene_id),
+    keytype = "ENSEMBL",
+    column = "ENTREZID",
+    multiVals = "first")
+
+# remove genes without ENTREZ ID
+ranks <- ranks[!is.na(names(ranks))]
+
+# remove cases, where multiple GENCODE IDS map to the same ENTREZ ID
+doublettes <- (names(ranks))[duplicated(names(ranks))]
+ranks <- ranks[!names(ranks) %in% doublettes]
+
+ranks <- sort(ranks)
+
+pathways <- reactomePathways(names(ranks))
+
+fgseaRes <- fgsea(pathways, ranks, BPPARAM = BPPARAM)
+
+collapsedPathways <- collapsePathways(
+    fgseaRes[order(pval)][padj < 0.01],
+    pathways,
+    ranks)
+
+mainPathways <- fgseaRes[pathway %in% collapsedPathways$mainPathways][order(-NES), pathway]
+
+fgseaRes %>%
+    as_tibble() %>%
+    filter(pathway %in% mainPathways) %>%
+    dplyr::select(-leadingEdge) %>%
+    arrange(-abs(NES)) %>%
+    mutate_at(vars(matches("pval|padj")), function(x) format(signif(x, 3), scientific = TRUE)) %>%
+    mutate_at(vars(matches("ES|log2err")), function(x) signif(x, 3)) %>% 
+    left_join(reactome_lookup, by = join_by("pathway" == "name")) %>% 
+    mutate(pathway = paste0('<a target=_blank href=',
+        reactome_url, id, '>', pathway, '</a>')) %>%
+    dplyr::select(-id) %>% 
+    DT::datatable(escape = FALSE)
+
+fgseaRes %>% 
+    as_tibble() %>%
+    filter(pathway %in% mainPathways) %>%
+    arrange(NES) %>%
+    mutate(pathway = tomixed(pathway)) %>%
+    mutate(pathway = factor(pathway, levels = pathway)) %>%
+    tidyr::separate_rows(leadingEdge, sep = "/") %>% 
+    dplyr::rename(ENTREZID = leadingEdge) %>%
+    left_join(
+        ranks %>% tibble::enframe(name = "ENTREZID", value = "rank"),
+        by = join_by(ENTREZID)) %>%   
+    ggplot(aes(rank, pathway)) +
+    ggridges::geom_density_ridges(aes(fill = padj)) +
+    geom_vline(
+        aes(xintercept = 0),
+        lty = 2,
+        lwd = .5) +
+    scale_fill_viridis_c(direction = -1) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe() +
+    xlab("Enrichment [kd vs. ctrl]") +
+    scale_y_discrete(NULL, labels = break.lines)
+```
+
+# LINC01348
+
+```{r}
+res_LINC01348 <- dds_list$LINC01348 %>%
+    results(name = "condition_1348_kd_vs_1348_ctrl",
+        lfcThreshold = log2fc_cutoff,
+        alpha = .05,
+        parallel = TRUE, BPPARAM = BPPARAM) %>%
+    # lfcShrink(.,
+    #     type = "apeglm") %>%
+    as_tibble(rownames = "gene_id") %>%
+    left_join(gene_annotation, by = join_by(gene_id)) %>%
+    dplyr::select(gene_id, symbol, gene_type, everything())
+
+write_csv(res_LINC01348, "results/dge_LINC01348.csv.gz")
+```
+
+## Overview
+
+```{r}
+# calculate pcs
+pca <- assay(rld) %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    dplyr::select(matches("gene_id|^1348")) %>% 
+    tibble::column_to_rownames("gene_id") %>%
+    data.matrix() %>%
+    t() %>%
+    prcomp(scale. = FALSE)
+
+# importance for labels of the plot
+importance <- summary(pca)[[6]]
+pca <- as_tibble(pca$x, rownames = "sample_id") %>%
+    dplyr::left_join(coldata, by = "sample_id")
+
+pca_pl <- pca %>% 
+    ggplot2::ggplot(ggplot2::aes(PC1, PC2)) +
+    geom_line(
+        aes(group = subject_id),
+        colour = "grey75",
+        lwd = .5) +
+    geom_point(
+        aes(colour = treatment,
+            pch = subject_id),
+        alpha = .5,
+        size = 2) +
+    scale_y_continuous(breaks = extended_range_breaks()(pca[, 3]),
+        labels = function(x) round(x, 1),
+        name = sprintf("PC2 (%s %% variance)", round(importance[2,2] * 100, 1))) +
+    scale_x_continuous(breaks = extended_range_breaks()(pca[, 2]),
+        labels = function(x) round(x, 1),
+        name = sprintf("PC1 (%s %% variance)",
+        round(importance[2,1] * 100, 1))) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_colorblind() +
+    guides(pch = "none")
+```
+
+
+```{r}
+dodge <- .5
+
+kd_pl <- tpm %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene2symbol) %>% 
+    dplyr::select(gene_id, symbol, everything()) %>%
+    filter(symbol %in% c("UCP1", "LINC01348")) %>% 
+    dplyr::select(-gene_id) %>% 
+    tidyr::pivot_longer(
+        cols = matches("kd|ctrl"),
+        names_to = "sample_id",
+        values_to = "tpm") %>%
+    filter(grepl("^1348", sample_id)) %>% 
+    left_join(coldata) %>% 
+    ggplot(aes(symbol, tpm)) +
+    geom_point(
+        aes(
+            colour = condition,
+            pch = subject_id),
+        alpha = .5,
+        size = 2,
+        position = position_dodge(dodge)) +
+    stat_summary(
+        aes(colour = condition),
+        fun = mean, geom = "crossbar",
+        fatten = 1.5, lwd = .5, width = .5,
+        position = position_dodge(width = dodge)) + 
+    stat_summary(
+        aes(colour = condition),
+        geom = "errorbar", fun.data = mean_se,
+        width = .33,
+        lwd = .5,
+        position = position_dodge(width = dodge)) +
+    scale_y_log10("TPM") +
+    xlab(NULL) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_colorblind(guide = "none") +
+    guides(pch = "none")
+```
+
+
+```{r}
+ma_pl <- res_LINC01348 %>%
+    mutate(significant = case_when(
+        padj < .05 ~ TRUE,
+        TRUE       ~ FALSE)) %>% 
+    ggplot(aes(log10(baseMean), log2FoldChange)) +
+    scattermore::geom_scattermore(
+        aes(colour = significant),
+        pointsize = 4,
+        alpha = .5,
+        pixels = pixels) +
+    scale_x_log10(
+            breaks = log10(c(1, 10, 100, 10000, max(res_h19$baseMean))),
+            labels = function(x) round(10^x),
+            name = "Average counts") +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_stata()
+```
+
+```{r}
+pca_pl + kd_pl + ma_pl + guide_area() +
+  plot_layout(guides = "collect")
+```
+
+## Results table
+
+```{r}
+res_LINC01348 %>% 
+    filter(padj < .05) %>%
+    mutate(
+        description = AnnotationDbi::mapIds(
+            org.Hs.eg.db,
+            column = "GENENAME",
+            keys = .$symbol,
+            keytype = "SYMBOL",
+            multiVals = "first")) %>% 
+    arrange(desc(abs(log2FoldChange))) %>% 
+    mutate(across(matches("baseMean|log2F|lfcSE|stat"), ~ round(., 2))) %>% 
+    mutate(across(matches("svalue|padj|pvalue"), scales::label_pvalue())) %>%
+    dplyr::select(gene_id, symbol, description, everything()) %>% 
+    mutate(
+        gene_id = paste0('<a target=_blank href=',
+            ensembl_path, tools::file_path_sans_ext(gene_id), '>', gene_id, '</a>'),
+        symbol = paste0('<a target=_blank href=',
+            genecards_path, symbol, '>', symbol, '</a>')) %>% 
+    DT::datatable(escape = FALSE)
+```
+
+## GSEA
+
+```{r}
+# ranks are only calculated here and reused for msigdb
+ranks <- multiGSEA::rankFeatures(
+    logFC = res_LINC01348$log2FoldChange,
+    pvalues = res_LINC01348$pvalue,
+    base = 2)
+
+names(ranks) <- AnnotationDbi::mapIds(org.Hs.eg.db,
+    keys =  tools::file_path_sans_ext(res_LINC01348$gene_id),
+    keytype = "ENSEMBL",
+    column = "ENTREZID",
+    multiVals = "first")
+
+# remove genes without ENTREZ ID
+ranks <- ranks[!is.na(names(ranks))]
+
+# remove cases, where multiple GENCODE IDS map to the same ENTREZ ID
+doublettes <- (names(ranks))[duplicated(names(ranks))]
+ranks <- ranks[!names(ranks) %in% doublettes]
+
+ranks <- sort(ranks)
+
+pathways <- reactomePathways(names(ranks))
+
+fgseaRes <- fgsea(pathways, ranks, BPPARAM = BPPARAM)
+
+collapsedPathways <- collapsePathways(
+    fgseaRes[order(pval)][padj < 0.01],
+    pathways,
+    ranks)
+
+mainPathways <- fgseaRes[pathway %in% collapsedPathways$mainPathways][order(-NES), pathway]
+
+fgseaRes %>%
+    as_tibble() %>%
+    filter(pathway %in% mainPathways) %>%
+    dplyr::select(-leadingEdge) %>%
+    arrange(-abs(NES)) %>%
+    mutate_at(vars(matches("pval|padj")), function(x) format(signif(x, 3), scientific = TRUE)) %>%
+    mutate_at(vars(matches("ES|log2err")), function(x) signif(x, 3)) %>%
+    left_join(reactome_lookup, by = join_by("pathway" == "name")) %>% 
+    mutate(pathway = paste0('<a target=_blank href=',
+        reactome_url, id, '>', pathway, '</a>')) %>%
+    dplyr::select(-id) %>% 
+    DT::datatable(escape = FALSE)
+
+fgseaRes %>% 
+    as_tibble() %>%
+    filter(pathway %in% mainPathways) %>%
+    arrange(NES) %>%
+    mutate(pathway = tomixed(pathway)) %>%
+    mutate(pathway = factor(pathway, levels = pathway)) %>%
+    tidyr::separate_rows(leadingEdge, sep = "/") %>% 
+    dplyr::rename(ENTREZID = leadingEdge) %>%
+    left_join(
+        ranks %>% tibble::enframe(name = "ENTREZID", value = "rank"),
+        by = join_by(ENTREZID)) %>%   
+    ggplot(aes(rank, pathway)) +
+    ggridges::geom_density_ridges(aes(fill = padj)) +
+    geom_vline(
+        aes(xintercept = 0),
+        lty = 2,
+        lwd = .5) +
+    scale_fill_viridis_c(direction = -1) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe() +
+    xlab("Enrichment [kd vs. ctrl]") +
+    ylab(NULL)
+```
+
+
+# LINC01914
+
+```{r}
+res_LINC01914 <- dds_list$LINC01914 %>% 
+    results(name = "condition_1914_kd_vs_1914_ctrl",
+        lfcThreshold = log2fc_cutoff,
+        alpha = .05,
+        parallel = TRUE, BPPARAM = BPPARAM) %>%
+    # lfcShrink(.,
+    #     type = "apeglm") %>%
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene_annotation, by = join_by(gene_id)) %>% 
+    dplyr::select(gene_id, symbol, gene_type, everything())
+
+write_csv(res_LINC01914, "results/dge_LINC01914.csv.gz")
+```
+
+## Overview
+
+```{r}
+# calculate pcs
+pca <- assay(rld) %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    dplyr::select(matches("gene_id|^1914")) %>% 
+    tibble::column_to_rownames("gene_id") %>%
+    data.matrix() %>%
+    t() %>%
+    prcomp(scale. = FALSE)
+
+# importance for labels of the plot
+importance <- summary(pca)[[6]]
+pca <- as_tibble(pca$x, rownames = "sample_id") %>%
+    dplyr::left_join(coldata, by = "sample_id")
+
+pca_pl <- pca %>% 
+    ggplot2::ggplot(ggplot2::aes(PC1, PC2)) +
+    geom_line(
+        aes(group = subject_id),
+        colour = "grey75",
+        lwd = .5) +
+    geom_point(
+        aes(colour = treatment,
+            pch = subject_id),
+        alpha = .5,
+        size = 2) +
+    scale_y_continuous(breaks = extended_range_breaks()(pca[, 3]),
+        labels = function(x) round(x, 1),
+        name = sprintf("PC2 (%s %% variance)", round(importance[2,2] * 100, 1))) +
+    scale_x_continuous(breaks = extended_range_breaks()(pca[, 2]),
+        labels = function(x) round(x, 1),
+        name = sprintf("PC1 (%s %% variance)",
+        round(importance[2,1] * 100, 1))) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_colorblind() +
+    guides(pch = "none")
+```
+
+
+```{r}
+dodge <- .5
+
+kd_pl <- tpm %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene2symbol) %>% 
+    dplyr::select(gene_id, symbol, everything()) %>%
+    filter(symbol %in% c("UCP1", "LINC01914")) %>% 
+    dplyr::select(-gene_id) %>% 
+    tidyr::pivot_longer(
+        cols = matches("kd|ctrl"),
+        names_to = "sample_id",
+        values_to = "tpm") %>%
+    filter(grepl("^1914", sample_id)) %>% 
+    left_join(coldata) %>% 
+    ggplot(aes(symbol, tpm)) +
+    geom_point(
+        aes(
+            colour = condition,
+            pch = subject_id),
+        alpha = .5,
+        size = 2,
+        position = position_dodge(dodge)) +
+    stat_summary(
+        aes(colour = condition),
+        fun = mean, geom = "crossbar",
+        fatten = 1.5, lwd = .5, width = .5,
+        position = position_dodge(width = dodge)) + 
+    stat_summary(
+        aes(colour = condition),
+        geom = "errorbar", fun.data = mean_se,
+        width = .33,
+        lwd = .5,
+        position = position_dodge(width = dodge)) +
+    scale_y_log10("TPM") +
+    xlab(NULL) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_colorblind(guide = "none") +
+    guides(pch = "none")
+```
+
+
+```{r}
+ma_pl <- res_LINC01914 %>%
+    mutate(significant = case_when(
+        padj < .05 ~ TRUE,
+        TRUE       ~ FALSE)) %>% 
+    ggplot(aes(log10(baseMean), log2FoldChange)) +
+    scattermore::geom_scattermore(
+        aes(colour = significant),
+        pointsize = 4,
+        alpha = .5,
+        pixels = pixels) +
+    scale_x_log10(
+            breaks = log10(c(1, 10, 100, 10000, max(res_h19$baseMean))),
+            labels = function(x) round(10^x),
+            name = "Average counts") +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe(colour = "black", sides = 'bl') +
+    scale_color_stata()
+```
+
+```{r}
+pca_pl + kd_pl + ma_pl + guide_area() +
+  plot_layout(guides = "collect")
+```
+
+## Results table
+
+```{r}
+res_LINC01914 %>% 
+    filter(padj < .05) %>%
+    mutate(
+        description = AnnotationDbi::mapIds(
+            org.Hs.eg.db,
+            column = "GENENAME",
+            keys = .$symbol,
+            keytype = "SYMBOL",
+            multiVals = "first")) %>% 
+    arrange(desc(abs(log2FoldChange))) %>% 
+    mutate(across(matches("baseMean|log2F|lfcSE|stat"), ~ round(., 2))) %>% 
+    mutate(across(matches("svalue|padj|pvalue"), scales::label_pvalue())) %>%
+    dplyr::select(gene_id, symbol, description, everything()) %>% 
+    mutate(
+        gene_id = paste0('<a target=_blank href=',
+            ensembl_path, tools::file_path_sans_ext(gene_id), '>', gene_id, '</a>'),
+        symbol = paste0('<a target=_blank href=',
+            genecards_path, symbol, '>', symbol, '</a>')) %>% 
+    DT::datatable(escape = FALSE)
+```
+
+
+## GSEA
+
+```{r}
+# ranks are only calculated here and reused for msigdb
+ranks <- multiGSEA::rankFeatures(
+    logFC = res_LINC01914$log2FoldChange,
+    pvalues = res_LINC01914$pvalue,
+    base = 2)
+
+names(ranks) <- AnnotationDbi::mapIds(org.Hs.eg.db,
+    keys =  tools::file_path_sans_ext(res_LINC01914$gene_id),
+    keytype = "ENSEMBL",
+    column = "ENTREZID",
+    multiVals = "first")
+
+# remove genes without ENTREZ ID
+ranks <- ranks[!is.na(names(ranks))]
+
+# remove cases, where multiple GENCODE IDS map to the same ENTREZ ID
+doublettes <- (names(ranks))[duplicated(names(ranks))]
+ranks <- ranks[!names(ranks) %in% doublettes]
+
+ranks <- sort(ranks)
+
+pathways <- reactomePathways(names(ranks))
+
+fgseaRes <- fgsea(pathways, ranks, BPPARAM = BPPARAM)
+
+collapsedPathways <- collapsePathways(
+    fgseaRes[order(pval)][padj < 0.01],
+    pathways,
+    ranks)
+
+mainPathways <- fgseaRes[pathway %in% collapsedPathways$mainPathways][order(-NES), pathway]
+
+fgseaRes %>%
+    as_tibble() %>%
+    filter(pathway %in% mainPathways) %>%
+    dplyr::select(-leadingEdge) %>%
+    arrange(-abs(NES)) %>%
+    mutate_at(vars(matches("pval|padj")), function(x) format(signif(x, 3), scientific = TRUE)) %>%
+    mutate_at(vars(matches("ES|log2err")), function(x) signif(x, 3)) %>%
+    left_join(reactome_lookup, by = join_by("pathway" == "name")) %>% 
+    mutate(pathway = paste0('<a target=_blank href=',
+        reactome_url, id, '>', pathway, '</a>')) %>%
+    dplyr::select(-id) %>% 
+    DT::datatable(escape = FALSE)
+
+fgseaRes %>% 
+    as_tibble()%>%
+    filter(pathway %in% mainPathways) %>%
+    arrange(NES) %>%
+    mutate(pathway = tomixed(pathway)) %>%
+    mutate(pathway = factor(pathway, levels = pathway)) %>%
+    tidyr::separate_rows(leadingEdge, sep = "/") %>% 
+    dplyr::rename(ENTREZID = leadingEdge) %>%
+    left_join(
+        ranks %>% tibble::enframe(name = "ENTREZID", value = "rank"),
+        by = join_by(ENTREZID)) %>%   
+    ggplot(aes(rank, pathway)) +
+    ggridges::geom_density_ridges(aes(fill = padj)) +
+    geom_vline(
+        aes(xintercept = 0),
+        lty = 2,
+        lwd = .5) +
+    scale_fill_viridis_c(direction = -1) +
+    theme_tufte(base_size = 12, base_family = "Helvetica") +
+    geom_rangeframe() +
+    xlab("Enrichment [kd vs. ctrl]") +
+    ylab(NULL)
+```
+
+# Summary
+
+The PCA indicates, that the variance due to the different subject ids is bigger then that
+caused by the knock down. So be careful when interpreting the data.
+
+There is a significant knock down for every lncRNA. The efficiency of the knock
+down of H19 is relatively mild, maybe because it is highly expressed.
+
+The effects of the knock down on the transcriptome seem to be low in all three
+cases, I had to lower the cutoff to 0 to get any reasonable number of
+significantly changing genes at all. This of course raises the probability of false positives.
+
+Pathway analysis shows some similar terms in all three analyses (extra cellular matrix related).
+This raises concerns, cause it is not to be expected that all three lncRNA genes
+work in the same way, is it?
+In my experience, this could be artefacts from the knock down. I have seen similar
+things in knock down experiments using antisense LNA. Even though the control is
+also treated with a scrambled siRNA, the cells might process them differently then
+the actual lncRNA targeting siRNAs, since the control does not bind to any RNA,
+which might trigger sequence independent down stream events.
+
+
+

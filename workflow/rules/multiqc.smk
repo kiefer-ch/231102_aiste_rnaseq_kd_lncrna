@@ -7,9 +7,7 @@ rule multiqc:
             state=["raw", "trimmed"]),
         expand("log/cutadapt/{sample_id}.log",
              sample_id = SAMPLE_IDS),
-        expand("data/salmon/{sample_id}/aux_info/meta_info.json",
-            sample_id = SAMPLE_IDS),
-        expand("data/salmon/{sample_id}/aux_info/fld.gz",
+        expand("data/salmon/{sample_id}/",
             sample_id = SAMPLE_IDS)
     output:
         "results/multiqc_data.zip",

@@ -1,0 +1,7 @@
+channels:
+  - conda-forge
+dependencies:
+  - r-base = 4.3.2
+  - r-renv = 1.0.3
+  - r-rstudioapi = 0.15
+  - r-rmarkdown = 2.25

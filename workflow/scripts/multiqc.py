@@ -10,7 +10,7 @@ log = snakemake.log_fmt_shell(stdout=True, stderr=True)
 
 lines = [
     "module_order:",
-    "    -salmon",
+    "    - salmon",
     "    - fastqc:",
     "        name: 'FastQC (trimmed)'",
     "        info: 'This section of the report shows FastQC results after adapter removal and base quality trimming.'",
