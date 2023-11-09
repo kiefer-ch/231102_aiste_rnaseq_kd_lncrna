@@ -35,6 +35,8 @@ suppressPackageStartupMessages({
     library("fgsea")
 })
 
+source("R/ggpheatmap.R")
+
 BPPARAM = BiocParallel::MulticoreParam(snakemake@threads)
 
 pixels = c(1024, 1024 * .65)
@@ -193,7 +195,7 @@ pca %>%
     scale_color_colorblind()
 ```
 
-## KD validation
+## KD validation + some markers
 
 KD for LINC01348 and LINC01914 seems to work. H19 is not really reduced much.
 The H19 samples don't have norepinephrin treatment, so we see the effect of
@@ -207,7 +209,11 @@ tpm %>%
     as_tibble(rownames = "gene_id") %>% 
     left_join(gene2symbol) %>% 
     dplyr::select(gene_id, symbol, everything()) %>%
-    filter(symbol %in% c("UCP1", "H19", "LINC01914", "LINC01348")) %>% 
+    filter(symbol %in% c("UCP1", "DIO2", "PPARG", "PLIN1", "H19", "LINC01914", "LINC01348")) %>% 
+    mutate(
+        symbol = factor(
+            symbol,
+            levels = c("H19", "LINC01914", "LINC01348", "UCP1", "DIO2", "PPARG", "PLIN1"))) %>% 
     dplyr::select(-gene_id) %>% 
     tidyr::pivot_longer(
         cols = matches("kd|ctrl"),
@@ -356,7 +362,7 @@ kd_pl <- tpm %>%
     as_tibble(rownames = "gene_id") %>% 
     left_join(gene2symbol) %>% 
     dplyr::select(gene_id, symbol, everything()) %>%
-    filter(symbol %in% c("UCP1", "H19")) %>% 
+    filter(symbol %in% c("UCP1", "PLIN1", "PPARG", "H19")) %>% 
     dplyr::select(-gene_id) %>% 
     tidyr::pivot_longer(
         cols = matches("kd|ctrl"),
@@ -400,9 +406,13 @@ ma_pl <- res_h19 %>%
     ggplot(aes(log10(baseMean), log2FoldChange)) +
     scattermore::geom_scattermore(
         aes(colour = significant),
-        pointsize = 4,
+        pointsize = 6,
         alpha = .5,
         pixels = pixels) +
+    geom_hline(
+        aes(yintercept = 0),
+        lty = 2,
+        lwd = .5) +
     scale_x_log10(
             breaks = log10(c(1, 10, 100, 10000, max(res_h19$baseMean))),
             labels = function(x) round(10^x),
@@ -421,7 +431,7 @@ pca_pl + kd_pl + ma_pl + guide_area() +
 ## Results table
 
 ```{r}
-res_h19 %>% 
+res_h19 %>%
     filter(padj < .05) %>%
     mutate(
         description = AnnotationDbi::mapIds(
@@ -440,6 +450,36 @@ res_h19 %>%
         symbol = paste0('<a target=_blank href=',
             genecards_path, symbol, '>', symbol, '</a>')) %>% 
     DT::datatable(escape = FALSE)
+```
+
+## Clustering
+
+```{r}
+anno_col <- coldata %>% 
+    mutate(
+        col_id = sample_id,
+        col_annotation = condition) %>% 
+    dplyr::select(col_id, col_annotation) %>% 
+    filter(grepl("H19", col_id))
+
+
+goi <- res_h19 %>%
+    filter(padj < .05) %>% 
+    pull(symbol)
+
+
+rld %>% 
+    assay() %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene2symbol) %>% 
+    dplyr::select(gene_id, symbol, everything()) %>%
+    filter(symbol %in% goi) %>% 
+    dplyr::select(matches("symbol|H19")) %>% 
+    ggpheatmap(
+        row_id = "symbol",
+        annotation_col = anno_col,
+        label = "rows",
+        label_size = 6)
 ```
 
 ## GSEA
@@ -624,9 +664,13 @@ ma_pl <- res_LINC01348 %>%
     ggplot(aes(log10(baseMean), log2FoldChange)) +
     scattermore::geom_scattermore(
         aes(colour = significant),
-        pointsize = 4,
+        pointsize = 6,
         alpha = .5,
         pixels = pixels) +
+    geom_hline(
+        aes(yintercept = 0),
+        lty = 2,
+        lwd = .5) +
     scale_x_log10(
             breaks = log10(c(1, 10, 100, 10000, max(res_h19$baseMean))),
             labels = function(x) round(10^x),
@@ -664,6 +708,37 @@ res_LINC01348 %>%
             genecards_path, symbol, '>', symbol, '</a>')) %>% 
     DT::datatable(escape = FALSE)
 ```
+
+
+## Clustering
+
+```{r}
+anno_col <- coldata %>% 
+    mutate(
+        col_id = sample_id,
+        col_annotation = condition) %>% 
+    dplyr::select(col_id, col_annotation) %>% 
+    filter(grepl("1348", col_id))
+
+
+goi <- res_LINC01348 %>%
+    filter(padj < .05) %>% 
+    pull(symbol)
+
+
+rld %>% 
+    assay() %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene2symbol) %>% 
+    dplyr::select(gene_id, symbol, everything()) %>%
+    filter(symbol %in% goi) %>% 
+    dplyr::select(matches("symbol|1348")) %>% 
+    ggpheatmap(
+        row_id = "symbol",
+        annotation_col = anno_col,
+        label = "rows")
+```
+
 
 ## GSEA
 
@@ -734,7 +809,7 @@ fgseaRes %>%
     theme_tufte(base_size = 12, base_family = "Helvetica") +
     geom_rangeframe() +
     xlab("Enrichment [kd vs. ctrl]") +
-    ylab(NULL)
+    scale_y_discrete(NULL, labels = break.lines)
 ```
 
 
@@ -848,9 +923,13 @@ ma_pl <- res_LINC01914 %>%
     ggplot(aes(log10(baseMean), log2FoldChange)) +
     scattermore::geom_scattermore(
         aes(colour = significant),
-        pointsize = 4,
+        pointsize = 6,
         alpha = .5,
         pixels = pixels) +
+    geom_hline(
+        aes(yintercept = 0),
+        lty = 2,
+        lwd = .5) +
     scale_x_log10(
             breaks = log10(c(1, 10, 100, 10000, max(res_h19$baseMean))),
             labels = function(x) round(10^x),
@@ -889,6 +968,36 @@ res_LINC01914 %>%
     DT::datatable(escape = FALSE)
 ```
 
+
+
+## Clustering
+
+```{r}
+anno_col <- coldata %>% 
+    mutate(
+        col_id = sample_id,
+        col_annotation = condition) %>% 
+    dplyr::select(col_id, col_annotation) %>% 
+    filter(grepl("1914", col_id))
+
+
+goi <- res_LINC01914 %>%
+    filter(padj < .05) %>% 
+    pull(symbol)
+
+
+rld %>% 
+    assay() %>% 
+    as_tibble(rownames = "gene_id") %>% 
+    left_join(gene2symbol) %>% 
+    dplyr::select(gene_id, symbol, everything()) %>%
+    filter(symbol %in% goi) %>% 
+    dplyr::select(matches("symbol|1914")) %>% 
+    ggpheatmap(
+        row_id = "symbol",
+        annotation_col = anno_col,
+        label = "rows")
+```
 
 ## GSEA
 
@@ -959,7 +1068,7 @@ fgseaRes %>%
     theme_tufte(base_size = 12, base_family = "Helvetica") +
     geom_rangeframe() +
     xlab("Enrichment [kd vs. ctrl]") +
-    ylab(NULL)
+    scale_y_discrete(NULL, labels = break.lines)
 ```
 
 # Summary

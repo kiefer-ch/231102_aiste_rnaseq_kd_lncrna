@@ -1,6 +1,6 @@
 {
   "bioconductor.version": "3.18",
-  "external.libraries": [],
+  "external.libraries": ["/home/christoph/R/x86_64-pc-linux-gnu-library/4.3/ggtree"],
   "ignored.packages": [],
   "package.dependency.fields": [
     "Imports",
